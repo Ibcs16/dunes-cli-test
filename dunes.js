@@ -623,6 +623,91 @@ program
     }
   });
 
+program
+  .command("splitDunes")
+  .description("Split dunes from wallet utxo")
+  .argument("<utxo>", "UTXO with hash:vout")
+  .argument("<splits>", "Number of splits")
+  .argument("<ticker>", "Dune ticker (name)")
+  .action(async (txhash, splits, ticker) => {
+    await walletSplitDunes(txhash, splits, ticker).catch((e) =>
+      console.log(e?.message)
+    );
+  });
+
+// split dune amount from wallet utxo to output utxos
+// utxo: hash:vout
+// numSplits: number of splits
+// ticker: dune ticker
+async function walletSplitDunes(utxo, numSplits, ticker) {
+  let wallet = JSON.parse(fs.readFileSync(WALLET_PATH));
+  const [txhash, vout] = utxo.split(":");
+
+  if (numSplits > 12) throw new Error("max splits is 12");
+  const dune_utxo = wallet.utxos.find(
+    (utxo) => utxo.txid == txhash && utxo.vout == vout
+  );
+
+  if (!dune_utxo) {
+    throw new Error(`utxo ${txhash} not found`);
+  }
+  const dunes = await getDunesForUtxo(`${dune_utxo.txid}:${dune_utxo.vout}`);
+
+  if (dunes.length == 0) throw new Error("no dunes");
+
+  // get dune by ticker
+  const duneOnUtxo = dunes.find((d) => d.dune == ticker);
+  // Extract the numeric part from duneOnUtxo.amount as a BigInt
+  const amount = duneOnUtxo.amount.match(/\d+/)[0];
+
+  let duneOnUtxoAmount = BigInt(amount);
+  const decimals = 8;
+
+  // Add the decimals
+  duneOnUtxoAmount *= BigInt(10 ** decimals);
+
+  const splitAmount = duneOnUtxoAmount / BigInt(numSplits);
+
+  const remainder = duneOnUtxoAmount % BigInt(numSplits);
+
+  let tx = new Transaction();
+  tx.from(dune_utxo);
+
+  const { id } = await getDune(duneOnUtxo.dune);
+
+  // parse given id string to dune id
+  const duneId = parseDuneId(id);
+
+  const edicts = [];
+  for (let i = 0; i < numSplits; i++) {
+    let amount = splitAmount;
+    if (i === 0) {
+      amount += remainder; // Add the remainder to the first split
+    }
+    edicts.push(new Edict(duneId, amount.toString(), i + 2));
+  }
+
+  const script = constructScript(null, 1, null, edicts);
+
+  tx.addOutput(new Transaction.Output({ script: script, satoshis: 0 }));
+
+  for (let i = 0; i < numSplits; i++) {
+    tx.to(wallet.address, 100_000); // Assuming 100,000 satoshis per output
+  }
+
+  // Fund the transaction to cover network fees
+  await fund(wallet, tx);
+
+  if (tx.inputAmount < tx.outputAmount + tx.getFee()) {
+    throw new Error("not enough funds");
+  }
+
+  console.log(tx.toObject());
+  await broadcast(tx, true);
+
+  console.log(tx.hash);
+}
+
 // sends the full balance of the specified dune
 async function walletSendDunes(
   txhash,
